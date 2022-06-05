@@ -1,2 +1,2 @@
 # sh-core
- The core plugin for Scout's Hideaway, holds and manages shared data.
+ The hub is a set of plugins which helps manage non-gamemode components.
