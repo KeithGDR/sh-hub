@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS `sh-players` ( `id` INT NOT NULL AUTO_INCREMENT , `accountid` INT NOT NULL , `steamid2` VARCHAR(64) NOT NULL , `steamid3` VARCHAR(64) NOT NULL , `steamid64` VARCHAR(64) NOT NULL , PRIMARY KEY (`id`), UNIQUE (`accountid`)) ENGINE = InnoDB;
