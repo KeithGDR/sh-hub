@@ -3,44 +3,23 @@
 
 #include <sourcemod>
 
-#define NOT_ASSIGNED -1
+#define INVALID_ID -1
 
-bool g_Late;
 Database g_Database;
 
 enum struct Player {
-	int client;
+	char steamid[64];
+
 	int id;
 
-	int accountid;
-	char steam2[64];
-	char steam3[64];
-	char steam64[64];
-
-	void Init(int client) {
-		this.client = client;
-	}
-
-	void SyncViaSteam() {
-		this.accountid = GetSteamAccountID(this.client);
-		GetClientAuthId(this.client, AuthId_Steam2, this.steam2, sizeof(Player::steam2));
-		GetClientAuthId(this.client, AuthId_Steam3, this.steam3, sizeof(Player::steam3));
-		GetClientAuthId(this.client, AuthId_SteamID64, this.steam64, sizeof(Player::steam64));
-	}
-
 	void Clear() {
-		this.client = 0;
-		this.id = NOT_ASSIGNED;
-		this.accountid = 0;
-		this.steam2[0] = '\0';
-		this.steam3[0] = '\0';
-		this.steam64[0] = '\0';
+		this.steamid[0] = '\0';
+
+		this.id = INVALID_ID;
 	}
 }
 
 Player g_Player[MAXPLAYERS + 1];
-
-GlobalForward g_Forward_OnPlayerSynced;
 
 public Plugin myinfo = {
 	name = "[SH] Players", 
@@ -51,76 +30,46 @@ public Plugin myinfo = {
 };
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max) {
-	RegPluginLibrary("sh-players");
 
-	CreateNative("SH_GetPlayerID", Native_GetID);
-
-	g_Forward_OnPlayerSynced = new GlobalForward("SH_OnPlayerSynced", ET_Ignore, Param_Cell, Param_Cell);
-
-	g_Late = late;
 	return APLRes_Success;
 }
 
 public void OnPluginStart() {
 	Database.Connect(OnSQLConnect, "scoutshideaway");
-
-	if (g_Late) {
-		for (int i = 1; i <= MaxClients; i++) {
-			if (IsClientConnected(i)) {
-				OnClientConnected(i);
-			}
-		}
-	}
+	RegConsoleCmd("sm_id", Command_ID, "Displays your player id.");
 }
 
 public void OnSQLConnect(Database db, const char[] error, any data) {
 	if (db == null) {
-		g_Late = false;
-		ThrowError("Error while connecting to database: %s", error);
+		ThrowError("Failed to connect to database: %s", error);
 	}
-	
+
 	g_Database = db;
 	LogMessage("Connected to database successfully.");
 
-	if (g_Late) {
-		g_Late = false;
-
-		char auth[64];
-		for (int i = 1; i <= MaxClients; i++) {
-			if (IsClientAuthorized(i) && GetClientAuthId(i, AuthId_Engine, auth, sizeof(auth))) {
-				OnClientAuthorized(i, auth);
-			}
+	char auth[64];
+	for (int i = 1; i <= MaxClients; i++) {
+		if (IsClientAuthorized(i) && GetClientAuthId(i, AuthId_Engine, auth, sizeof(auth))) {
+			OnClientAuthorized(i, auth);
 		}
 	}
 }
 
-public void OnClientConnected(int client) {
-	g_Player[client].Init(client);
-}
-
 public void OnClientAuthorized(int client, const char[] auth) {
-	if (IsFakeClient(client)) {
-		return;
-	}
-
-	g_Player[client].SyncViaSteam();
+	strcopy(g_Player[client].steamid, 64, auth);
 
 	if (g_Database == null) {
 		return;
 	}
 
-	char sQuery[256];
-	g_Database.Format(sQuery, sizeof(sQuery), "SELECT id FROM `sh-players` WHERE accountid = '%i';", g_Player[client].accountid);
-	g_Database.Query(OnParsePlayer, sQuery, GetClientUserId(client));
+	char sQuery[1024];
+	g_Database.Format(sQuery, sizeof(sQuery), "SELECT * FROM `players` WHERE steamid = '%s';", g_Player[client].steamid);
+	g_Database.Query(OnParsePlayer, sQuery, GetClientUserId(client), DBPrio_Low);
 }
 
-public void OnClientDisconnect_Post(int client) {
-	g_Player[client].Clear();
-}
-
-public void OnParsePlayer(Database db, DBResultSet results, const char[] error, any userid) {
+public void OnParsePlayer(Database db, DBResultSet results, const char[] error, any data) {
 	int client;
-	if ((client = GetClientOfUserId(userid)) == 0) {
+	if ((client = GetClientOfUserId(data)) == 0) {
 		return;
 	}
 
@@ -130,41 +79,48 @@ public void OnParsePlayer(Database db, DBResultSet results, const char[] error, 
 
 	if (results.FetchRow()) {
 		g_Player[client].id = results.FetchInt(0);
-		CallSyncForward(client, g_Player[client].id);
 	} else {
-		char sQuery[256];
-		g_Database.Format(sQuery, sizeof(sQuery), "INSERT INTO `sh-players` (accountid, steam2, steam3, steam64) VALUES ('%i', '%s', '%s', '%s');", g_Player[client].accountid, g_Player[client].steam2, g_Player[client].steam3, g_Player[client].steam64);
-		g_Database.Query(OnInsertPlayer, sQuery, userid);
+		char sName[MAX_NAME_LENGTH];
+		GetClientName(client, sName, sizeof(sName));
+
+		int size = 2 * strlen(sName) + 1;
+		char[] sSafeName = new char[size];
+		g_Database.Escape(sName, sSafeName, size);
+
+		char sQuery[1024];
+		g_Database.Format(sQuery, sizeof(sQuery), "INSERT INTO `players` (name, steamid) VALUES ('%s', '%s');", sSafeName, g_Player[client].steamid);
+		g_Database.Query(OnCreatePlayer, sQuery, GetClientUserId(client), DBPrio_Low);
 	}
 }
 
-public void OnInsertPlayer(Database db, DBResultSet results, const char[] error, any userid) {
+public void OnCreatePlayer(Database db, DBResultSet results, const char[] error, any data) {
 	int client;
-	if ((client = GetClientOfUserId(userid)) == 0) {
+	if ((client = GetClientOfUserId(data)) == 0) {
 		return;
 	}
 
 	if (results == null) {
-		ThrowError("Error while inserting new player: %s", error);
+		ThrowError("Error while creating player: %s", error);
 	}
 
 	g_Player[client].id = results.InsertId;
-	CallSyncForward(client, g_Player[client].id);
 }
 
-public int Native_GetID(Handle plugin, int numParams) {
-	int client = GetNativeCell(1);
+public void OnClientDisconnect_Post(int client) {
+	g_Player[client].Clear();
+}
 
-	if (client < 1 || client > MaxClients || IsFakeClient(client)) {
-		ThrowNativeError(SP_ERROR_NATIVE, "Client index '%i' is invalid or is a bot.", client);
+public Action Command_ID(int client, int args) {
+	if (client == 0) {
+		ReplyToCommand(client, "You must be in-game to use this command.");
+		return Plugin_Handled;
 	}
 
-	return g_Player[client].id;
-}
+	if (g_Player[client].id == INVALID_ID) {
+		ReplyToCommand(client, "You do not have an id yet.");
+		return Plugin_Handled;
+	}
 
-void CallSyncForward(int client, int id) {
-	Call_StartForward(g_Forward_OnPlayerSynced);
-	Call_PushCell(client);
-	Call_PushCell(id);
-	Call_Finish();
+	ReplyToCommand(client, "Your id is %d.", g_Player[client].id);
+	return Plugin_Handled;
 }
